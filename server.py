@@ -1,17 +1,34 @@
-"""
-MLR-VGGNet FastAPI Server
-Run with: uvicorn server:app --host 0.0.0.0 --port 8000
-"""
-
 import io
+import os
 import torch
 import torch.nn as nn
 import numpy as np
+import gdown
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from torchvision import transforms
 from torchvision.models import vgg16, VGG16_Weights
+
+
+# ── Auto-download model from Google Drive ────────────────────────────────────
+
+MODEL_PATH = "mlr_vggnet_optuna_best.pth"
+GDRIVE_ID  = "1kaUgo6XLK5Q5WIX8oGdVUHYzcI3h2uFA"
+
+def download_model():
+    if not os.path.exists(MODEL_PATH):
+        print("[...] Downloading model from Google Drive...")
+        gdown.download(
+            f"https://drive.google.com/uc?id={GDRIVE_ID}",
+            MODEL_PATH,
+            quiet=False
+        )
+        print("[OK] Model downloaded")
+    else:
+        print("[OK] Model already exists")
+
+download_model()
 
 
 # ── Model Definition ──────────────────────────────────────────────────────────
@@ -100,19 +117,16 @@ class MLRVGGNet(nn.Module):
         return self.head(out)
 
 
-# ── Setup ─────────────────────────────────────────────────────────────────────
+# ── App Setup ─────────────────────────────────────────────────────────────────
 
 CLASSES = ["Mackerel Tuna", "Skipjack Tuna", "Yellowfin Tuna"]
-DEVICE  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE  = torch.device("cpu")  # Render free tier has no GPU
 
-# Load model once at startup
 model = MLRVGGNet(num_classes=3, dropout=0.0, ac_dropout=0.0).to(DEVICE)
-model.load_state_dict(torch.load(
-    "mlr_vggnet_optuna_best.pth", map_location=DEVICE))
+model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
 model.eval()
-print(f"[OK] Model loaded on {DEVICE}")
+print(f"[OK] Model ready on {DEVICE}")
 
-# Preprocessing — identical to val_tf in training code
 transform = transforms.Compose([
     transforms.Resize(int(224 * 1.14)),
     transforms.CenterCrop(224),
@@ -123,7 +137,6 @@ transform = transforms.Compose([
 
 app = FastAPI(title="Tuna Classifier API")
 
-# Allow requests from Flutter app
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -136,17 +149,19 @@ app.add_middleware(
 
 @app.get("/")
 def health():
-    return {"status": "ok", "model": "MLR-VGGNet", "classes": CLASSES}
+    return {
+        "status":  "ok",
+        "model":   "MLR-VGGNet",
+        "classes": CLASSES
+    }
 
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    # Read and preprocess image
     contents = await file.read()
     img      = Image.open(io.BytesIO(contents)).convert("RGB")
     x        = transform(img).unsqueeze(0).to(DEVICE)
 
-    # Run inference
     with torch.no_grad():
         logits = model(x)
         probs  = torch.softmax(logits, dim=1).squeeze().cpu().numpy()
